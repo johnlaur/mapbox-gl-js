@@ -3,12 +3,16 @@ version: 2
 jobs:
   build:
     docker:
-      - image: mbgl/ci:r4-linux-gl-js
+      - image: mbgl/ci:r4-linux-clang-3.9
     working_directory: ~/mapbox-gl-js
     steps:
       - checkout
       - restore_cache:
           key: v1-mapbox-gl-js-cache
+      - run:
+          name: install yarn
+          command: |
+            bash ./.circleci/yarn.sh
       - run:
           name: install dependencies
           command: yarn
