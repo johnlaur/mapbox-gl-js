@@ -1,185 +1,202 @@
+// @flow
 
-const DOM = require('../util/dom');
-const Point = require('point-geometry');
+import { MapMouseEvent, MapTouchEvent, MapWheelEvent } from '../ui/events';
+import DOM from '../util/dom';
+import type Map from './map';
+import scrollZoom from './handler/scroll_zoom';
+import boxZoom from './handler/box_zoom';
+import dragRotate from './handler/drag_rotate';
+import dragPan from './handler/drag_pan';
+import keyboard from './handler/keyboard';
+import doubleClickZoom from './handler/dblclick_zoom';
+import touchZoomRotate from './handler/touch_zoom_rotate';
 
 const handlers = {
-    scrollZoom: require('./handler/scroll_zoom'),
-    boxZoom: require('./handler/box_zoom'),
-    dragRotate: require('./handler/drag_rotate'),
-    dragPan: require('./handler/drag_pan'),
-    keyboard: require('./handler/keyboard'),
-    doubleClickZoom: require('./handler/dblclick_zoom'),
-    touchZoomRotate: require('./handler/touch_zoom_rotate')
+    scrollZoom,
+    boxZoom,
+    dragRotate,
+    dragPan,
+    keyboard,
+    doubleClickZoom,
+    touchZoomRotate
 };
 
-module.exports = function bindHandlers(map, options) {
+export default function bindHandlers(map: Map, options: {interactive: boolean, clickTolerance: number}) {
     const el = map.getCanvasContainer();
     let contextMenuEvent = null;
     let mouseDown = false;
     let startPos = null;
-    let tapped = null;
 
     for (const name in handlers) {
-        map[name] = new handlers[name](map, options);
+        (map: any)[name] = new handlers[name](map, options);
         if (options.interactive && options[name]) {
-            map[name].enable(options[name]);
+            (map: any)[name].enable(options[name]);
         }
     }
 
-    el.addEventListener('mouseout', onMouseOut, false);
-    el.addEventListener('mousedown', onMouseDown, false);
-    el.addEventListener('mouseup', onMouseUp, false);
-    el.addEventListener('mousemove', onMouseMove, false);
-    el.addEventListener('touchstart', onTouchStart, false);
-    el.addEventListener('touchend', onTouchEnd, false);
-    el.addEventListener('touchmove', onTouchMove, false);
-    el.addEventListener('touchcancel', onTouchCancel, false);
-    el.addEventListener('click', onClick, false);
-    el.addEventListener('dblclick', onDblClick, false);
-    el.addEventListener('contextmenu', onContextMenu, false);
+    DOM.addEventListener(el, 'mouseout', onMouseOut);
+    DOM.addEventListener(el, 'mousedown', onMouseDown);
+    DOM.addEventListener(el, 'mouseup', onMouseUp);
+    DOM.addEventListener(el, 'mousemove', onMouseMove);
+    DOM.addEventListener(el, 'mouseover', onMouseOver);
 
-    function onMouseOut(e) {
-        fireMouseEvent('mouseout', e);
-    }
+    // Bind touchstart and touchmove with passive: false because, even though
+    // they only fire a map events and therefore could theoretically be
+    // passive, binding with passive: true causes iOS not to respect
+    // e.preventDefault() in _other_ handlers, even if they are non-passive
+    // (see https://bugs.webkit.org/show_bug.cgi?id=184251)
+    DOM.addEventListener(el, 'touchstart', onTouchStart, {passive: false});
+    DOM.addEventListener(el, 'touchmove', onTouchMove, {passive: false});
 
-    function onMouseDown(e) {
-        map.stop();
-        startPos = DOM.mousePos(el, e);
-        fireMouseEvent('mousedown', e);
+    DOM.addEventListener(el, 'touchend', onTouchEnd);
+    DOM.addEventListener(el, 'touchcancel', onTouchCancel);
+    DOM.addEventListener(el, 'click', onClick);
+    DOM.addEventListener(el, 'dblclick', onDblClick);
+    DOM.addEventListener(el, 'contextmenu', onContextMenu);
+    DOM.addEventListener(el, 'wheel', onWheel, {passive: false});
 
+    function onMouseDown(e: MouseEvent) {
         mouseDown = true;
+        startPos = DOM.mousePos(el, e);
+
+        const mapEvent = new MapMouseEvent('mousedown', map, e);
+        map.fire(mapEvent);
+
+        if (mapEvent.defaultPrevented) {
+            return;
+        }
+
+        if (options.interactive && !map.doubleClickZoom.isActive()) {
+            map.stop();
+        }
+
+        map.boxZoom.onMouseDown(e);
+
+        if (!map.boxZoom.isActive() && !map.dragPan.isActive()) {
+            map.dragRotate.onMouseDown(e);
+        }
+
+        if (!map.boxZoom.isActive() && !map.dragRotate.isActive()) {
+            map.dragPan.onMouseDown(e);
+        }
     }
 
-    function onMouseUp(e) {
-        const rotating = map.dragRotate && map.dragRotate.isActive();
+    function onMouseUp(e: MouseEvent) {
+        const rotating = map.dragRotate.isActive();
 
         if (contextMenuEvent && !rotating) {
             // This will be the case for Mac
-            fireMouseEvent('contextmenu', contextMenuEvent);
+            map.fire(new MapMouseEvent('contextmenu', map, contextMenuEvent));
         }
 
         contextMenuEvent = null;
         mouseDown = false;
-        fireMouseEvent('mouseup', e);
+
+        map.fire(new MapMouseEvent('mouseup', map, e));
     }
 
-    function onMouseMove(e) {
-        if (map.dragPan && map.dragPan.isActive()) return;
-        if (map.dragRotate && map.dragRotate.isActive()) return;
+    function onMouseMove(e: MouseEvent) {
+        if (map.dragPan.isActive()) return;
+        if (map.dragRotate.isActive()) return;
 
-        let target = e.toElement || e.target;
+        let target: ?Node = (e.target: any);
         while (target && target !== el) target = target.parentNode;
         if (target !== el) return;
 
-        fireMouseEvent('mousemove', e);
+        map.fire(new MapMouseEvent('mousemove', map, e));
     }
 
-    function onTouchStart(e) {
-        map.stop();
-        fireTouchEvent('touchstart', e);
+    function onMouseOver(e: MouseEvent) {
+        let target: ?Node = (e.target: any);
+        while (target && target !== el) target = target.parentNode;
+        if (target !== el) return;
 
-        if (!e.touches || e.touches.length > 1) return;
+        map.fire(new MapMouseEvent('mouseover', map, e));
+    }
 
-        if (!tapped) {
-            tapped = setTimeout(onTouchTimeout, 300);
+    function onMouseOut(e: MouseEvent) {
+        map.fire(new MapMouseEvent('mouseout', map, e));
+    }
 
-        } else {
-            clearTimeout(tapped);
-            tapped = null;
-            fireMouseEvent('dblclick', e);
+    function onTouchStart(e: TouchEvent) {
+        const mapEvent = new MapTouchEvent('touchstart', map, e);
+        map.fire(mapEvent);
+
+        if (mapEvent.defaultPrevented) {
+            return;
         }
+
+        if (options.interactive) {
+            map.stop();
+        }
+
+        if (!map.boxZoom.isActive() && !map.dragRotate.isActive()) {
+            map.dragPan.onTouchStart(e);
+        }
+
+        map.touchZoomRotate.onStart(e);
+        map.doubleClickZoom.onTouchStart(mapEvent);
     }
 
-    function onTouchMove(e) {
-        fireTouchEvent('touchmove', e);
+    function onTouchMove(e: TouchEvent) {
+        map.fire(new MapTouchEvent('touchmove', map, e));
     }
 
-    function onTouchEnd(e) {
-        fireTouchEvent('touchend', e);
+    function onTouchEnd(e: TouchEvent) {
+        map.fire(new MapTouchEvent('touchend', map, e));
     }
 
-    function onTouchCancel(e) {
-        fireTouchEvent('touchcancel', e);
+    function onTouchCancel(e: TouchEvent) {
+        map.fire(new MapTouchEvent('touchcancel', map, e));
     }
 
-    function onTouchTimeout() {
-        tapped = null;
-    }
-
-    function onClick(e) {
+    function onClick(e: MouseEvent) {
         const pos = DOM.mousePos(el, e);
-
-        if (pos.equals(startPos)) {
-            fireMouseEvent('click', e);
+        if (pos.equals(startPos) || pos.dist(startPos) < options.clickTolerance) {
+            map.fire(new MapMouseEvent('click', map, e));
         }
     }
 
-    function onDblClick(e) {
-        fireMouseEvent('dblclick', e);
-        e.preventDefault();
+    function onDblClick(e: MouseEvent) {
+        const mapEvent = new MapMouseEvent('dblclick', map, e);
+        map.fire(mapEvent);
+
+        if (mapEvent.defaultPrevented) {
+            return;
+        }
+
+        map.doubleClickZoom.onDblClick(mapEvent);
     }
 
-    function onContextMenu(e) {
-        const rotating = map.dragRotate && map.dragRotate.isActive();
+    function onContextMenu(e: MouseEvent) {
+        const rotating = map.dragRotate.isActive();
         if (!mouseDown && !rotating) {
             // Windows: contextmenu fired on mouseup, so fire event now
-            fireMouseEvent('contextmenu', e);
+            map.fire(new MapMouseEvent('contextmenu', map, e));
         } else if (mouseDown) {
             // Mac: contextmenu fired on mousedown; we save it until mouseup for consistency's sake
             contextMenuEvent = e;
         }
 
-        e.preventDefault();
+        // prevent browser context menu when necessary; we don't allow it with rotation
+        // because we can't discern rotation gesture start from contextmenu on Mac
+        if (map.dragRotate.isEnabled() || map.listens('contextmenu')) {
+            e.preventDefault();
+        }
     }
 
-    function fireMouseEvent(type, e) {
-        const pos = DOM.mousePos(el, e);
+    function onWheel(e: WheelEvent) {
+        if (options.interactive) {
+            map.stop();
+        }
 
-        return map.fire(type, {
-            lngLat: map.unproject(pos),
-            point: pos,
-            originalEvent: e
-        });
+        const mapEvent = new MapWheelEvent('wheel', map, e);
+        map.fire(mapEvent);
+
+        if (mapEvent.defaultPrevented) {
+            return;
+        }
+
+        map.scrollZoom.onWheel(e);
     }
-
-    function fireTouchEvent(type, e) {
-        const touches = DOM.touchPos(el, e);
-        const singular = touches.reduce((prev, curr, i, arr) => {
-            return prev.add(curr.div(arr.length));
-        }, new Point(0, 0));
-
-        return map.fire(type, {
-            lngLat: map.unproject(singular),
-            point: singular,
-            lngLats: touches.map((t) => { return map.unproject(t); }, this),
-            points: touches,
-            originalEvent: e
-        });
-    }
-};
-
-/**
- * @typedef {Object} MapMouseEvent
- * @property {string} type The event type.
- * @property {Map} target The `Map` object that fired the event.
- * @property {MouseEvent} originalEvent
- * @property {Point} point The pixel coordinates of the mouse event target, relative to the map
- *   and measured from the top left corner.
- * @property {LngLat} lngLat The geographic location on the map of the mouse event target.
- */
-
-/**
- * @typedef {Object} MapTouchEvent
- * @property {string} type The event type.
- * @property {Map} target The `Map` object that fired the event.
- * @property {TouchEvent} originalEvent
- * @property {Point} point The pixel coordinates of the center of the touch event points, relative to the map
- *   and measured from the top left corner.
- * @property {LngLat} lngLat The geographic location on the map of the center of the touch event points.
- * @property {Array<Point>} points The array of pixel coordinates corresponding to
- *   a [touch event's `touches`](https://developer.mozilla.org/en-US/docs/Web/API/TouchEvent/touches)
- *   property.
- * @property {Array<LngLat>} lngLats The geographical locations on the map corresponding to
- *   a [touch event's `touches`](https://developer.mozilla.org/en-US/docs/Web/API/TouchEvent/touches)
- *   property.
- */
+}

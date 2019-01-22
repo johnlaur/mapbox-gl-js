@@ -1,4 +1,5 @@
 // @flow
-
 /* eslint-env browser */
-module.exports = self;
+import type {Window} from '../../types/window';
+
+export default (self: Window);

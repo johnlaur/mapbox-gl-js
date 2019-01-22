@@ -1,28 +1,42 @@
-const util = require('../util/util');
-const ajax = require('../util/ajax');
-const browser = require('../util/browser');
-const normalizeURL = require('../util/mapbox').normalizeSourceURL;
+// @flow
 
-module.exports = function(options, callback) {
-    const loaded = function(err, tileJSON) {
+import { pick } from '../util/util';
+
+import { getJSON, ResourceType } from '../util/ajax';
+import browser from '../util/browser';
+import { normalizeSourceURL as normalizeURL, canonicalizeTileset } from '../util/mapbox';
+
+import type {RequestTransformFunction} from '../ui/map';
+import type {Callback} from '../types/callback';
+import type {TileJSON} from '../types/tilejson';
+import type {Cancelable} from '../types/cancelable';
+
+export default function(options: any, requestTransformFn: RequestTransformFunction, callback: Callback<TileJSON>): Cancelable {
+    const loaded = function(err: ?Error, tileJSON: ?Object) {
         if (err) {
             return callback(err);
+        } else if (tileJSON) {
+            const result: any = pick(
+                tileJSON,
+                ['tiles', 'minzoom', 'maxzoom', 'attribution', 'mapbox_logo', 'bounds']
+            );
+
+            if (tileJSON.vector_layers) {
+                result.vectorLayers = tileJSON.vector_layers;
+                result.vectorLayerIds = result.vectorLayers.map((layer) => { return layer.id; });
+            }
+
+            // only canonicalize tile tileset if source is declared using a tilejson url
+            if (options.url) {
+                result.tiles = canonicalizeTileset(result, options.url);
+            }
+            callback(null, result);
         }
-
-        const result = util.pick(tileJSON, ['tiles', 'minzoom', 'maxzoom', 'attribution', 'mapbox_logo', 'bounds']);
-
-        if (tileJSON.vector_layers) {
-            result.vectorLayers = tileJSON.vector_layers;
-            result.vectorLayerIds = result.vectorLayers.map((layer) => { return layer.id; });
-        }
-
-        callback(null, result);
     };
 
     if (options.url) {
-        ajax.getJSON(normalizeURL(options.url), loaded);
+        return getJSON(requestTransformFn(normalizeURL(options.url), ResourceType.Source), loaded);
     } else {
-        browser.frame(loaded.bind(null, null, options));
+        return browser.frame(() => loaded(null, options));
     }
-};
-
+}

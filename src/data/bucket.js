@@ -1,35 +1,29 @@
 // @flow
 
-const ArrayGroup = require('./array_group');
-const BufferGroup = require('./buffer_group');
-const util = require('../util/util');
-
-import type CollisionBoxArray from '../symbol/collision_box';
+import type {CollisionBoxArray} from './array_types';
 import type Style from '../style/style';
-import type StyleLayer from '../style/style_layer';
-import type {ProgramInterface} from './program_configuration';
+import type {TypedStyleLayer} from '../style/style_layer/typed_style_layer';
 import type FeatureIndex from './feature_index';
-import type {SerializedArrayGroup} from './array_group';
+import type Context from '../gl/context';
+import type {FeatureStates} from '../source/source_state';
+import type {ImagePosition} from '../render/image_atlas';
 
-export type BucketParameters = {
+export type BucketParameters<Layer: TypedStyleLayer> = {
     index: number,
-    layers: Array<StyleLayer>,
+    layers: Array<Layer>,
     zoom: number,
+    pixelRatio: number,
     overscaling: number,
     collisionBoxArray: CollisionBoxArray,
-    arrays?: SerializedArrayGroup
+    sourceLayerIndex: number,
+    sourceID: string
 }
 
 export type PopulateParameters = {
     featureIndex: FeatureIndex,
     iconDependencies: {},
+    patternDependencies: {},
     glyphDependencies: {}
-}
-
-export type SerializedBucket = {
-    zoom: number,
-    layerIds: Array<string>,
-    arrays: SerializedArrayGroup
 }
 
 export type IndexedFeature = {
@@ -38,22 +32,32 @@ export type IndexedFeature = {
     sourceLayerIndex: number,
 }
 
+export type BucketFeature = {|
+    index: number,
+    sourceLayerIndex: number,
+    geometry: Array<Array<Point>>,
+    properties: Object,
+    type: 1 | 2 | 3,
+    id?: any,
+    +patterns: {[string]: {"min": string, "mid": string, "max": string}}
+|};
+
 /**
- * The `Bucket` class is the single point of knowledge about turning vector
+ * The `Bucket` interface is the single point of knowledge about turning vector
  * tiles into WebGL buffers.
  *
- * `Bucket` is an abstract class. A subclass exists for each style layer type.
+ * `Bucket` is an abstract interface. An implementation exists for each style layer type.
  * Create a bucket via the `StyleLayer#createBucket` method.
  *
  * The concrete bucket types, using layout options from the style layer,
- * transform feature geometries into vertex and element data for use by the
+ * transform feature geometries into vertex and index data for use by the
  * vertex shader.  They also (via `ProgramConfiguration`) use feature
  * properties and the zoom level to populate the attributes needed for
  * data-driven styling.
  *
  * Buckets are designed to be built on a worker thread and then serialized and
  * transferred back to the main thread for rendering.  On the worker side, a
- * bucket's vertex, element, and attribute data is stored in `bucket.arrays:
+ * bucket's vertex, index, and attribute data is stored in `bucket.arrays:
  * ArrayGroup`.  When a bucket's data is serialized and sent back to the main
  * thread, is gets deserialized (using `new Bucket(serializedBucketData)`, with
  * the array data now stored in `bucket.buffers: BufferGroup`.  BufferGroups
@@ -61,78 +65,18 @@ export type IndexedFeature = {
  *
  * @private
  */
-class Bucket {
-    index: number;
-    zoom: number;
-    overscaling: number;
-    layers: Array<StyleLayer>;
-    buffers: BufferGroup;
-    arrays: ArrayGroup;
+export interface Bucket {
+    layerIds: Array<string>;
+    hasPattern: boolean;
+    +layers: Array<any>;
+    +stateDependentLayers: Array<any>;
+    +stateDependentLayerIds: Array<string>;
+    populate(features: Array<IndexedFeature>, options: PopulateParameters): void;
+    update(states: FeatureStates, vtLayer: VectorTileLayer, imagePositions: {[string]: ImagePosition}): void;
+    isEmpty(): boolean;
 
-    +addFeature: (feature: VectorTileFeature) => void;
-
-    static deserialize(input: Array<SerializedBucket>, style: Style): {[string]: Bucket} {
-        const output = {};
-
-        // Guard against the case where the map's style has been set to null while
-        // this bucket has been parsing.
-        if (!style) return output;
-
-        for (const serialized of input) {
-            const layers = serialized.layerIds
-                .map((id) => style.getLayer(id))
-                .filter(Boolean);
-
-            if (layers.length === 0) {
-                continue;
-            }
-
-            const bucket = layers[0].createBucket(util.extend({layers}, serialized));
-            for (const layer of layers) {
-                output[layer.id] = bucket;
-            }
-        }
-
-        return output;
-    }
-
-    constructor(options: BucketParameters, programInterface: ProgramInterface) {
-        this.zoom = options.zoom;
-        this.overscaling = options.overscaling;
-        this.layers = options.layers;
-        this.index = options.index;
-
-        if (options.arrays) {
-            this.buffers = new BufferGroup(programInterface, options.layers, options.zoom, options.arrays);
-        } else {
-            this.arrays = new ArrayGroup(programInterface, options.layers, options.zoom);
-        }
-    }
-
-    populate(features: Array<IndexedFeature>, options: PopulateParameters) {
-        for (const {feature, index, sourceLayerIndex} of features) {
-            if (this.layers[0].filter(feature)) {
-                this.addFeature(feature);
-                options.featureIndex.insert(feature, index, sourceLayerIndex, this.index);
-            }
-        }
-    }
-
-    getPaintPropertyStatistics() {
-        return util.mapObject(this.arrays.layerData, data => data.paintPropertyStatistics);
-    }
-
-    isEmpty() {
-        return this.arrays.isEmpty();
-    }
-
-    serialize(transferables?: Array<Transferable>): SerializedBucket {
-        return {
-            zoom: this.zoom,
-            layerIds: this.layers.map((l) => l.id),
-            arrays: this.arrays.serialize(transferables)
-        };
-    }
+    upload(context: Context): void;
+    uploadPending(): boolean;
 
     /**
      * Release the WebGL resources associated with the buffers. Note that because
@@ -141,12 +85,35 @@ class Bucket {
      *
      * @private
      */
-    destroy() {
-        if (this.buffers) {
-            this.buffers.destroy();
-            (this : any).buffers = null;
-        }
-    }
+    destroy(): void;
 }
 
-module.exports = Bucket;
+export function deserialize(input: Array<Bucket>, style: Style): {[string]: Bucket} {
+    const output = {};
+
+    // Guard against the case where the map's style has been set to null while
+    // this bucket has been parsing.
+    if (!style) return output;
+
+    for (const bucket of input) {
+        const layers = bucket.layerIds
+            .map((id) => style.getLayer(id))
+            .filter(Boolean);
+
+        if (layers.length === 0) {
+            continue;
+        }
+
+        // look up StyleLayer objects from layer ids (since we don't
+        // want to waste time serializing/copying them from the worker)
+        (bucket: any).layers = layers;
+        if ((bucket: any).stateDependentLayerIds) {
+            (bucket: any).stateDependentLayers = (bucket: any).stateDependentLayerIds.map((lId) => layers.find((l) => l.id === lId));
+        }
+        for (const layer of layers) {
+            output[layer.id] = bucket;
+        }
+    }
+
+    return output;
+}

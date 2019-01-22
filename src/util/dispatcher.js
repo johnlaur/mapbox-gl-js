@@ -1,25 +1,34 @@
+// @flow
 
-const util = require('./util');
-const Actor = require('./actor');
+import { uniqueId, asyncAll } from './util';
+import Actor from './actor';
+
+import type WorkerPool from './worker_pool';
 
 /**
  * Responsible for sending messages from a {@link Source} to an associated
  * {@link WorkerSource}.
  *
- * @interface Dispatcher
  * @private
  */
 class Dispatcher {
+    workerPool: WorkerPool;
+    actors: Array<Actor>;
+    currentActor: number;
+    id: number;
 
-    constructor(workerPool, parent) {
+    // exposed to allow stubbing in unit tests
+    static Actor: Class<Actor>;
+
+    constructor(workerPool: WorkerPool, parent: any) {
         this.workerPool = workerPool;
         this.actors = [];
         this.currentActor = 0;
-        this.id = util.uniqueId();
+        this.id = uniqueId();
         const workers = this.workerPool.acquire(this.id);
         for (let i = 0; i < workers.length; i++) {
             const worker = workers[i];
-            const actor = new Actor(worker, parent, this.id);
+            const actor = new Dispatcher.Actor(worker, parent, this.id);
             actor.name = `Worker ${i}`;
             this.actors.push(actor);
         }
@@ -27,40 +36,26 @@ class Dispatcher {
 
     /**
      * Broadcast a message to all Workers.
-     * @method
-     * @name broadcast
-     * @param {string} type
-     * @param {Object} data
-     * @param {Function} callback
-     * @memberof Dispatcher
-     * @instance
      */
-    broadcast(type, data, cb) {
+    broadcast(type: string, data: mixed, cb?: Function) {
         cb = cb || function () {};
-        util.asyncAll(this.actors, (actor, done) => {
+        asyncAll(this.actors, (actor, done) => {
             actor.send(type, data, done);
         }, cb);
     }
 
     /**
      * Send a message to a Worker.
-     * @method
-     * @name send
-     * @param {string} type
-     * @param {Object} data
-     * @param {Function} callback
-     * @param {number|undefined} [targetID] The ID of the Worker to which to send this message. Omit to allow the dispatcher to choose.
-     * @returns {number} The ID of the worker to which the message was sent.
-     * @memberof Dispatcher
-     * @instance
+     * @param targetID The ID of the Worker to which to send this message. Omit to allow the dispatcher to choose.
+     * @returns The ID of the worker to which the message was sent.
      */
-    send(type, data, callback, targetID, buffers) {
+    send(type: string, data: mixed, callback?: ?Function, targetID?: number): number {
         if (typeof targetID !== 'number' || isNaN(targetID)) {
             // Use round robin to send requests to web workers.
             targetID = this.currentActor = (this.currentActor + 1) % this.actors.length;
         }
 
-        this.actors[targetID].send(type, data, callback, buffers);
+        this.actors[targetID].send(type, data, callback);
         return targetID;
     }
 
@@ -71,4 +66,6 @@ class Dispatcher {
     }
 }
 
-module.exports = Dispatcher;
+Dispatcher.Actor = Actor;
+
+export default Dispatcher;
